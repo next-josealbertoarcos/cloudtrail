@@ -66,19 +66,19 @@ Let's see what kinds of events exist in out dataset:
 map_chr(events, ~ .$eventName) %>% table() %>% sort(decreasing = TRUE)
 ```
 
+<br>
+
+### Creation and deletion events (I)
+
 The events that may interest us are:
 
-[DescribeClusters](http://docs.aws.amazon.com/redshift/latest/APIReference/API_DescribeClusters.html)
 [DeleteCluster](http://docs.aws.amazon.com/redshift/latest/APIReference/API_DeleteCluster.html)
 [RestoreFromClusterSnapshot](http://docs.aws.amazon.com/redshift/latest/APIReference/API_RestoreFromClusterSnapshot.html)
-[DeleteClusterSnapshot](http://docs.aws.amazon.com/redshift/latest/APIReference/API_DeleteClusterSnapshot.html)
-[ModifyCluster](http://docs.aws.amazon.com/redshift/latest/APIReference/API_ModifyCluster.html)
-[CreateClusterSnapshot](http://docs.aws.amazon.com/redshift/latest/APIReference/API_CreateClusterSnapshot.html)
 
 So lets take only the events of interest:
 
 ```{r}
-is_interesting <- map_lgl(events, ~ .$eventName %in% c("DescribeReservedNodes", "DeleteCluster", "RestoreFromClusterSnapshot", "DeleteClusterSnapshot", "ModifyCluster", "CreateClusterSnapshot"))
+is_interesting <- map_lgl(events, ~ .$eventName %in% c("DeleteCluster", "RestoreFromClusterSnapshot"))
 events <- events[is_interesting]
 save(events, file = "interesting_events.RData")
 ```
@@ -98,24 +98,15 @@ ggplot(data = df_timeline %>% filter(event != "DescribeReservedNodes"),
   theme_minimal()
 ```
 
-The plot shows some clear patterns for some kind of events (like *ModifyCluter*), but it is difficult to point patterns in the relation of several different events. Let's take only the events that create and remove clusters.
-
-We know that the only two type of existent events that are able to start or remove a cluster are:
-
-*RestoreFromClusterSnapshot* creates a cluster from a snapshot.
-*DeleteCluster* deletes a previously provisioned cluster.
-
-Let's explore them:
+Wow, lots of events. Let's see a summary:
 
 ```{r}
-cluster_creation <- df_timeline %>% 
-  filter(event %in% c("RestoreFromClusterSnapshot", "DeleteCluster"))
-table(cluster_creation$event)
+table(df_timeline$event)
 ```
 
-Well, something extrange here. Cluster have been destroyed 198 time, while created only 106 times... 
+Well, something extrange here. Clusters have been destroyed 198 times, while created only 106 times... 
 
-What is happening here?
+What is happening?
 
 It would be nice if we could see the exact number of clusters in each moment. Is that possible? Let's explore the *DescribeClusters* events...
 
@@ -209,6 +200,50 @@ There are clear patterns in the use of most of the clusters. Nice!
 
 Let's see if we can cross this data with the creation and deletion events.
 
+<br>
 
+### Creation and deletion events (II)
 
+When a cluster is deleted, the deletion event (*DeleteCluster*) contains the identifier of the cluster (*$requestParameters$clusterIdentifier*). In the same way, when a cluster is created, the creation event (*RestoreFromClusterSnapshot*) contains the cluster identifier (*$responseElements$clusterIdentifier*).
 
+Let's create a dataframe containing all the creation and deletion events with their date and their target cluster:
+
+```{r}
+load("interesting_events.RData")
+
+n_events <- length(events)
+df_event_names    <- rep(NA_character_, n_events)
+df_event_times    <- rep(NA_character_, n_events)
+df_target_cluster <- rep(NA_character_, n_events)
+
+for(i in 1:n_events){
+  event <- events[[i]]
+  df_event_names[i] <- event$eventName
+  df_event_times[i] <- event$eventTime
+  
+  cluster_id <- event$responseElements$clusterIdentifier
+  df_target_cluster[i] <- ifelse(is.null(cluster_id), NA_character_, cluster_id)
+}
+
+creation_deletion_events <- tibble(event = df_event_names,
+                                   datetime = df_event_times %>% ymd_hms(),
+                                   target_cluster = df_target_cluster)
+
+```
+
+Let's plot the events:
+
+```{r}
+
+ggplot(data = creation_deletion_events, 
+       mapping = aes(x = datetime, y = target_cluster)) +
+  geom_point(mapping = aes(color = event)) +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.title = element_blank())
+
+```
+
+It looks that the events are correct! The problem is that lots of them do not have a target. Interesting detail.
