@@ -1,0 +1,412 @@
+---
+title: "Exploring the data"
+author: "José Alberto Arcos Sánchez"
+date: "24 de julio de 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(jsonlite)
+library(purrr)
+library(lubridate)
+library(glue)
+```
+
+
+### Fast exploration
+
+
+Let's load a json file and see what it contains:
+
+```{r}
+file <- read_json("../2017/07/21/405540905874_CloudTrail_eu-west-1_20170721T0000Z_toFMCcKusnum4iUt.json")
+str(file)
+```
+
+```{r}
+map(file[[1]], ~ list(length(.), names(.)))
+```
+
+Each element in the json file contains 14 or 15 features. The "extra" feature is *apiVersion*. Let's see if the existence of apiVersion is related to other variable:
+
+```{r}
+res <- map(file[[1]], ~ list("apiVersion" %in% names(.), .$eventSource))
+do.call(rbind, res)
+```
+
+It looks like the existence of *apiVersion* depends on the source of the event. Nice!
+
+To facilitate the exploration, let's create a dataframe with the json file.
+
+The data contains some complexities:
+- *userIdentity* contains a list with varying elements. We need to take its elements out:
+
+```{r}
+map(file[[1]], ~ names(.$userIdentity)) %>% unlist() %>% unique()
+```
+
+- *sessionContext* is also a list with varying elements:
+
+```{r}
+map(file[[1]], ~ names(.$userIdentity$sessionContext)) %>% unlist() %>% unique()
+map(file[[1]], ~ names(.$userIdentity$sessionContext$attributes)) %>% 
+  unlist() %>% unique()
+map(file[[1]], ~ names(.$userIdentity$sessionContext$sessionIssuer)) %>% 
+  unlist() %>% unique()
+```
+
+This may happen more times in our unseen data, so let's look for a general solution. We can build a data frame unnesting every value using the **plyr** package:
+
+```{r}
+library(plyr)
+
+data <- file[[1]]
+datalist <- map(data, ~ as.data.frame(as.list(unlist(.))))
+df <- rbind.fill(datalist)
+View(df)
+```
+
+Great!! 
+
+--------------------------------------------------------------------------------
+
+Some files contain fields that are difficult to "tidy":
+
+```{r}
+file <- read_json("../2017/04/22/405540905874_CloudTrail_eu-west-1_20170422T0000Z_EdBbEouphu5PwnGH.json")
+data <- file[[1]]
+datalist <- map(data, ~ as.data.frame(as.list(unlist(.))))
+df <- rbind.fill(datalist)
+View(df)
+```
+
+*df* has 596 variables. Why!!??
+
+```{r}
+colnames(df)
+```
+
+Because of the *responseElements* component. Let's see the tree structure:
+
+```{r}
+str(data[[254]])
+```
+
+
+### Exploration by variable (only main variables)
+
+Let's take data for an entire day.
+
+```{r}
+json_files <- list.files(path = "../2017/07/21/", full.names = TRUE)
+json_list <- map(json_files, ~ read_json(path = .)[[1]])
+json_list <- do.call(c, json_list)
+```
+
+And see how many events we have and what they contain:
+
+```{r}
+glue("Number of events: {length(json_list)}\n\n")
+glue("Number of fields in each event:")
+table(map_dbl(json_list, ~ length(.)))
+```
+
+The number of fields in each event is not constant. Some events have more fields than others.
+Let's see all the possible fields:
+
+```{r}
+map(json_list, ~ names(.)) %>% unlist() %>% table() %>% sort(decreasing = TRUE)
+```
+
+20 possible fields! Let's see how many different combinations are seen in a day:
+
+```{r}
+all_combinations <- map(json_list, ~ names(.))
+all_unique_combinations <- unique(all_combinations)
+glue("Number of different combinations = {length(all_unique_combinations)}")
+```
+
+Maybe there are 6 types of events??
+
+
+Let's now explore the main fields and their typical values:
+
+--------------------------------------------------------------------------------
+**awsRegion**
+
+```{r}
+table(map_chr(json_list, ~ .$awsRegion))
+```
+
+
+--------------------------------------------------------------------------------
+**eventID**
+
+```{r}
+map_chr(json_list, ~ .$eventID) %>% unique() %>% head()
+```
+
+
+--------------------------------------------------------------------------------
+**eventName**
+
+This looks like an important field. It may describe the action the "user" wants to perform. For this particular day, 87 different event names have been logged.
+
+```{r}
+glue("Number of different names: {map_chr(json_list, ~ .$eventName) %>% unique() %>% length()}")
+sort(table(map_chr(json_list, ~ .$eventName)), decreasing = TRUE)
+```
+
+
+--------------------------------------------------------------------------------
+**eventSource**
+
+There are 36 different sources in this particular day.
+
+```{r}
+sort(table(map_chr(json_list, ~ .$eventSource)), decreasing = TRUE)
+```
+
+The most frequent one in *ec2.amazonaws.com* followed by *dynamodb.amazonaws.com* and *s3.amazonaws.com*.
+
+
+--------------------------------------------------------------------------------
+**eventTime**
+
+```{r}
+datetimes <- map(json_list, ~ ymd_hms(.$eventTime)) %>% do.call(c,.)
+summary(datetimes)
+```
+
+It contains events of a unique day, as expected. It is not a complete day, so the results are nice.
+
+
+--------------------------------------------------------------------------------
+**eventType**
+
+```{r}
+sort(table(map_chr(json_list, ~ .$eventType)), decreasing = TRUE)
+```
+
+
+--------------------------------------------------------------------------------
+**eventVersion**
+
+There are at least two event versions:
+
+```{r}
+table(map_chr(json_list, ~ .$eventVersion))
+```
+
+The 1.05 version is much more frequent.
+
+
+--------------------------------------------------------------------------------
+**recipientAccountId**
+
+```{r}
+table(map_chr(json_list, ~ .$recipientAccountId))
+```
+
+
+--------------------------------------------------------------------------------
+**requestParameters**
+
+A list with lots of fields:
+
+```{r}
+map(json_list, ~ names(.$requestParameters)) %>% unlist() %>% table() %>% sort(decreasing = TRUE) %>% head(n = 10)
+```
+
+--------------------------------------------------------------------------------
+**responseElements**
+
+A list with lots of fields:
+
+```{r}
+map(json_list, ~ names(.$responseElements)) %>% unlist() %>% table() %>% sort(decreasing = TRUE) %>% head(n = 10)
+```
+
+
+--------------------------------------------------------------------------------
+**sourceIPAddress**
+
+There are not a lot of source IP addresses in this particular day.
+
+```{r}
+sort(table(map_chr(json_list, ~ .$sourceIPAddress)), decreasing = TRUE) %>% head()
+```
+
+
+--------------------------------------------------------------------------------
+**userAgent**
+
+```{r}
+sort(table(map_chr(json_list, ~ .$userAgent)), decreasing = TRUE) %>% head()
+```
+
+--------------------------------------------------------------------------------
+**userIdentity**
+
+This field is a list with several (and changing) subfields:
+
+```{r}
+sort(table(map(json_list, ~ names(.x$userIdentity)) %>% unlist()), decreasing = TRUE)
+```
+
+
+*type*
+
+```{r}
+sort(table(map_chr(json_list, ~ .x$userIdentity$type)), decreasing = TRUE)
+```
+
+
+*accountId*
+
+```{r}
+sort(table(map(json_list, ~ .x$userIdentity$accountId) %>% unlist()), decreasing = TRUE)
+```
+
+
+*principalId*
+
+```{r}
+sort(table(map(json_list, ~ .x$userIdentity$accountId) %>% unlist()), decreasing = TRUE)
+```
+
+
+*arn*
+
+```{r}
+sort(table(map(json_list, ~ .x$userIdentity$arn) %>% unlist()), decreasing = TRUE)
+```
+
+
+*accessKeyId*
+
+```{r}
+sort(table(map(json_list, ~ .x$userIdentity$accessKeyId) %>% unlist()), decreasing = TRUE)
+```
+
+
+*sessionContext*
+
+It is a list with 2 fields:
+
+```{r}
+sort(table(map(json_list, ~ names(.x$userIdentity$sessionContext)) %>% unlist()), decreasing = TRUE)
+```
+
+*sessionContext.attributes*
+
+```{r}
+sort(table(map(json_list, ~ names(.x$userIdentity$sessionContext$attributes)) %>% unlist()), decreasing = TRUE)
+```
+
+mfaAuthenticated >> (TRUE/FALSE)
+creationDate >> date :)
+
+*sessionContext.sessionIssuer*
+
+```{r}
+sort(table(map(json_list, ~ names(.x$userIdentity$sessionContext$sessionIssuer)) %>% unlist()), decreasing = TRUE)
+```
+
+
+*userName*
+
+```{r}
+sort(table(map(json_list, ~ .x$userIdentity$userName) %>% unlist()), decreasing = TRUE)
+```
+
+
+*invokedBy*
+
+```{r}
+sort(table(map(json_list, ~ .x$userIdentity$invokedBy) %>% unlist()), decreasing = TRUE)
+```
+
+
+
+
+
+
+
+
+--------------------------------------------------------------------------------
+**requestID**
+
+```{r}
+map(json_list, ~ .$requestID) %>% unlist() %>% unique() %>% head()
+```
+
+
+--------------------------------------------------------------------------------
+**apiVersion**
+
+```{r}
+sort(table(map_chr(json_list, ~ ifelse(test = is.null(.x$apiVersion), yes = "unknown", no = .x$apiVersion))), decreasing = TRUE)
+```
+
+--------------------------------------------------------------------------------
+**errorCode**
+
+```{r}
+map(json_list, ~ .$errorCode) %>% unlist() %>% table() %>% sort(decreasing = TRUE)
+```
+
+--------------------------------------------------------------------------------
+**errorMessage**
+
+```{r}
+map(json_list, ~ .$errorMessage) %>% unlist() %>% table() %>% sort(decreasing = TRUE)
+```
+
+--------------------------------------------------------------------------------
+**resources**
+
+A list with three fields:
+
+```{r}
+map(json_list, ~ names(.$resources %>% unlist(recursive = FALSE))) %>% unlist() %>% table()
+```
+
+
+*resources.accountId*
+
+```{r}
+map(json_list, ~ .$resources[[1]]$accountId) %>% unlist() %>% table()
+```
+
+
+*resources.ARN*
+
+```{r}
+map(json_list, ~ .$resources[[1]]$ARN) %>% unlist() %>% table() %>% head()
+```
+
+
+*resources.type*
+
+```{r}
+map(json_list, ~ .$resources[[1]]$type) %>% unlist() %>% table() %>% head()
+```
+
+--------------------------------------------------------------------------------
+**sharedEventID**
+
+```{r}
+map(json_list, ~ .$sharedEventID) %>% unlist() %>% table() %>% head()
+```
+
+
+--------------------------------------------------------------------------------
+**additionalEventData**
+
+A list with several varying fields:
+
+```{r}
+map(json_list, ~ names(.$additionalEventData)) %>% unlist() %>% table()
+```

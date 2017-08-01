@@ -1,0 +1,46 @@
+ -------------------------------------------------------------------------------
+ ¿Qué sistema se está logueando?
+ 
+ Cloudtrail es una herramienta gratuita de Amazon que loguea la interacción con los elementos de la arquitectura que hay en el proyecto. La idea es utilizar el log de Cloudtrail para detectar comportamientos anómalos en la interacción entre los elementos de la arquitectura y los distintos usuarios.
+ 
+ Algunas ideas:
+ 
+ Idea1: Lo más caro son los clusters de Redshift, Dynamo, EMR (tiene un Spark) (resourceType). 
+ La idea inicial es vigilar que los clusters no se quedan encendidos cuando no deben. 
+ Para EMR y Redshift los eventos clave son los "create" (RestoreFromClusterSnapshot).
+ Idea2: No se deben crear usuarios en la cuenta, se asumen roles. Patrones en la asunción de roles.
+ Los createuser están prohibidos salvo casos muy concretos. No debería por tanto haber usuarios nuevos.
+ Idea3: Eventos de PUT y GET en S3 (buscar anomalías).
+ Idea4: Un patrón de evento de Redshift sigue un patrón de evento de S3.
+ Idea5: Vigilar que siempre que se baja el throughput de las tablas de Dynamo una vez que se ha subido.
+ 
+ -------------------------------------------------------------------------------
+ ¿Qué significa cada feature?
+ 
+awsRegion, eventID, eventName, eventSource, eventTime, eventType, eventVersion, 
+recipientAccountId, requestParameters, responseElements, sourceIPAddress, userAgent, 
+userIdentity, requestID, apiVersion, errorCode, errorMessage, resources, sharedEventID, 
+additionalEventData
+
+ (completar en el Rmd)
+
+No sabe lo que significan muchas de las features, pero no tiene problema es buscar el significado de cualquiera de ellas en caso de que pueda sernos útil.
+
+-------------------------------------------------------------------------------
+¿Tenéis ejemplos reales o inventados de anomalías?
+
+No. Nos ha comentado algunos ejemplos, como dejarse clusters levantados los fines de semana, creación de usuarios, usuarios que vienen y van, ... Comenta que son cosas que no suelen pasar, y que a lo mejor hay un mes entero en el que no ocurre nada raro.
+
+
+-------------------------------------------------------------------------------
+¿Qué variables os parecen significativas a la hora de detectar anomalías?
+
+resourceType: indica qué recurso es el objetivo de la petición
+eventName: qué tipo de acción se quiere realizar
+userIdentity: qué usuario está realizando las acciones
+
+
+-------------------------------------------------------------------------------
+¿Qué variables diriais que no sirven para nada?
+
+¿La mayoría? xD

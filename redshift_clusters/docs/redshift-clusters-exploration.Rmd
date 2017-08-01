@@ -1,0 +1,214 @@
+---
+title: "Redshift cluster usage"
+author: "José Alberto Arcos Sánchez"
+date: "28 de julio de 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(purrr)
+library(futile.logger)
+library(glue)
+library(stringr)
+library(jsonlite)
+library(tidyverse)
+library(lubridate)
+library(magrittr)
+```
+
+### Abstract
+
+This document explores the usage of Redshift clusters in the available log data. Redshift clusters are one of the main economical costs of the project, so it is important to monitor them in order to detect inefficient patterns (like clusters running but doing nothing).
+
+<br>
+
+### Redshift events in Cloudtrail
+
+The list of supported actions and its meaning can be found [here](http://docs.aws.amazon.com/redshift/latest/APIReference/API_Operations.html).
+
+We can easily take all the events whose *eventSource* is *redshift.amazonaws.com*:
+
+```{r}
+
+folders <- list.dirs("../")
+
+events <- map(folders, function(folder){
+  files <- list.files(path = folder, full.names = T)
+  files <- files[str_detect(files, ".json")]
+  map(files, function(file){
+    flog.debug(glue("Reading file {file}"))
+    events_in_file <- read_json(file) %>% unlist(recursive = FALSE)
+    map(events_in_file, function(event){
+      if(event$eventSource == "redshift.amazonaws.com"){
+        return(event)
+      } else {
+        return(NULL)
+      }
+    })
+  })
+})
+
+```
+
+The events variable is huge (5.6 Gb), so let's clean it and save it to avoid possible accidents:
+
+```{r}
+events <- unlist(events, recursive = FALSE) %>% unlist(recursive = FALSE)
+is_null <- map_lgl(events, ~ is.null(.))
+events <- events[!is_null]
+save(events, file = "all_redshift_events.RData")
+```
+
+Let's see what kinds of events exist in out dataset:
+
+```{r}
+map_chr(events, ~ .$eventName) %>% table() %>% sort(decreasing = TRUE)
+```
+
+The events that may interest us are:
+
+[DescribeClusters](http://docs.aws.amazon.com/redshift/latest/APIReference/API_DescribeClusters.html)
+[DeleteCluster](http://docs.aws.amazon.com/redshift/latest/APIReference/API_DeleteCluster.html)
+[RestoreFromClusterSnapshot](http://docs.aws.amazon.com/redshift/latest/APIReference/API_RestoreFromClusterSnapshot.html)
+[DeleteClusterSnapshot](http://docs.aws.amazon.com/redshift/latest/APIReference/API_DeleteClusterSnapshot.html)
+[ModifyCluster](http://docs.aws.amazon.com/redshift/latest/APIReference/API_ModifyCluster.html)
+[CreateClusterSnapshot](http://docs.aws.amazon.com/redshift/latest/APIReference/API_CreateClusterSnapshot.html)
+
+So lets take only the events of interest:
+
+```{r}
+is_interesting <- map_lgl(events, ~ .$eventName %in% c("DescribeReservedNodes", "DeleteCluster", "RestoreFromClusterSnapshot", "DeleteClusterSnapshot", "ModifyCluster", "CreateClusterSnapshot"))
+events <- events[is_interesting]
+save(events, file = "interesting_events.RData")
+```
+
+Now, let's plot a timeline with all the interesting events. We need to create a dataframe with dates and eventNames:
+
+```{r}
+load("interesting_events.RData")
+plot_datetimes <- map_chr(events, ~ .$eventTime) %>% ymd_hms()
+plot_events <- map_chr(events, ~ .$eventName)
+df_timeline <- tibble(datetime = plot_datetimes, event = plot_events)
+
+ggplot(data = df_timeline %>% filter(event != "DescribeReservedNodes"), 
+       mapping = aes(x = datetime, y = event)) + 
+  geom_point(mapping = aes(shape = event, color = event)) +
+  guides(color = FALSE, shape = FALSE) +
+  theme_minimal()
+```
+
+The plot shows some clear patterns for some kind of events (like *ModifyCluter*), but it is difficult to point patterns in the relation of several different events. Let's take only the events that create and remove clusters.
+
+We know that the only two type of existent events that are able to start or remove a cluster are:
+
+*RestoreFromClusterSnapshot* creates a cluster from a snapshot.
+*DeleteCluster* deletes a previously provisioned cluster.
+
+Let's explore them:
+
+```{r}
+cluster_creation <- df_timeline %>% 
+  filter(event %in% c("RestoreFromClusterSnapshot", "DeleteCluster"))
+table(cluster_creation$event)
+```
+
+Well, something extrange here. Cluster have been destroyed 198 time, while created only 106 times... 
+
+What is happening here?
+
+It would be nice if we could see the exact number of clusters in each moment. Is that possible? Let's explore the *DescribeClusters* events...
+
+<br>
+
+### Exploring the *DescribeClusters* events
+
+What about the *DescribeClusters* events?
+
+```{r}
+load("all_redshift_events.RData")
+describe_clusters_index <- map_lgl(events, ~ .$eventName == "DescribeClusters")
+describe_clusters <- events[describe_clusters_index]
+rm(events)
+```
+
+Yeah! This event contains info about the existing clusters, and we have lots of this kind of events! 
+Let's create a dataframe containing all the interesting cluster info. We want to know all the clusters that have existed, when they were created and the number of nodes of each cluster:
+
+```{r}
+# Preallocate variable
+df_datetime = rep(NA_character_, 5e5)
+df_cluster = rep(NA_character_, 5e5)
+df_creation_date = rep(NA_character_, 5e5)
+df_n_nodes = numeric(5e5)
+
+# Fill variable
+index <- 1
+pb <- progress_estimated(n = length(describe_clusters))
+# pb <- progress_estimated(n = 1e4)
+for(i in 1:length(describe_clusters)){
+  # for(i in 1:1e4){  
+  event <- describe_clusters[[i]]
+  n_clusters <- length(event$responseElements$clusters)
+  
+  if(n_clusters > 0){
+    
+    datetimes <- rep(event$eventTime, n_clusters)
+    cluster_names <- map_chr(event$responseElements$clusters,  ~ .$clusterIdentifier)
+    creation_dates <- map_chr(event$responseElements$clusters, function(cluster){
+      times <- cluster$clusterCreateTime
+      ifelse(is.null(times), NA_character_, times)
+    })
+    n_nodes <- map_int(event$responseElements$clusters, ~ .$numberOfNodes)
+    
+    if(length(datetimes) != n_clusters) browser()
+    if(length(cluster_names) != n_clusters) browser()
+    if(length(creation_dates) != n_clusters) browser()
+    if(length(n_nodes) != n_clusters) browser()
+    
+    df_datetime[index:(index + n_clusters - 1)] <- datetimes
+    df_cluster[index:(index + n_clusters - 1)] <- cluster_names
+    df_creation_date[index:(index + n_clusters - 1)] <- creation_dates
+    df_n_nodes[index:(index + n_clusters - 1)] <- n_nodes
+    
+    index <- index + n_clusters
+    
+  }
+
+  pb$tick()$print()
+}
+
+cluster_info <- tibble(datetime = df_datetime[1:index],
+                       cluster = df_cluster[1:index],
+                       creation_date = df_creation_date[1:index],
+                       n_nodes = df_n_nodes[1:index])
+
+cluster_summary <- 
+  cluster_info %>% filter(complete.cases(.)) %>% 
+  group_by(cluster, creation_date, n_nodes) %>% 
+  summarise(datetime = datetime[[1]]) %>% 
+  ungroup() %>% 
+  mutate(datetime = ymd_hms(datetime)) %>% 
+  mutate(creation_date = fast_strptime(creation_date, format = "%b %d, %Y %H:%M:%S %p", lt = FALSE))
+
+cluster_summary
+```
+
+Let's plot the creation of each cluster:
+
+```{r}
+ggplot(data = cluster_summary, mapping = aes(x = creation_date, y = cluster)) +
+  geom_point(mapping = aes(size = n_nodes), color = "blue", alpha = 0.3) +
+  guides(size = FALSE) +
+  theme_minimal() +
+  theme(axis.title = element_blank())
+```
+
+Nice plot!! Each point represents a cluster creation. Its size represents the number of nodes of the cluster (from 1 to 10).
+There are clear patterns in the use of most of the clusters. Nice!
+
+Let's see if we can cross this data with the creation and deletion events.
+
+
+
+
