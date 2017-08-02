@@ -1,0 +1,149 @@
+---
+title: 'CloudTrail Logs Analysis: Detecting Anomalous Throughput Events'
+output:
+  html_document: default
+  html_notebook: default
+---
+
+```{r, include = FALSE}
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(parallel)
+library(glue)
+library(futile.logger)
+library(data.table)
+library(jsonlite)
+library(R.utils)
+library(magrittr)
+```
+
+The data consists of the logs of events given by AWS CloudTrail. They are in JSON format and compressed in gzip format, so we need to extract all of them. First, we get all the file paths:
+
+```{r}
+path = "~/apidatos-mx-pro-cloudtrail"
+months <- list.files(path, full.names = TRUE)
+folders <- unlist(lapply(months, function(x) list.files(x, full.names = TRUE)))
+n_folders <- length(folders)
+```
+
+Now we are going to extract all the files. We can speed up it using parallel processing.
+
+```{r}
+
+no_cores <- detectCores() - 1
+cl <- makeCluster(no_cores)
+clusterEvalQ(cl, expr = {
+  library(jsonlite)
+  library(R.utils)
+}) %>% invisible()
+
+json.list <- vector("list", n_folders)
+pb <- progress_estimated(n = length(folders))
+
+for (folder in folders) {
+  gz_files <- list.files(folder, pattern = ".gz$", full.names = TRUE)
+  if (length(gz_files) > 0) {
+    parLapply(cl, gz_files, function(x) gunzip(x, overwrite = TRUE))
+  }
+  pb$tick()$print()
+}
+
+stopCluster(cl)
+```
+
+Once we have all the decompressed JSON files, we are going to read all of the different event names in order to have an idia of how many they could be.
+
+```{r}
+events_names = c()
+pb <- progress_estimated(n = length(folders))
+
+for(folder in folders){
+  files <- list.files(folder, pattern = ".json$", full.names = TRUE)
+  events_names <- c(events_names, 
+                   map(.x = files, function(file) {
+                     read_json(file) %>% unlist(recursive = FALSE) %>% 
+                       map(., function(event) event$eventName) %>% unlist()
+                   }))
+  
+  pb$tick()$print()
+}
+events_names %<>% unlist() 
+```
+
+```{r}
+events_count <- events_names %>% table() %>% sort(., decreasing = T)
+glue("Number of total events: {length(events_names)}")
+glue("Number of different events: {length(unique(events_names))}")
+round(100*events_count[0:25]/length(events_names),2)
+```
+
+Now We are going to focus on one particular event: changing the capacity requirements for read and write activity in DynamoDB. This is called throughput capacity, and it can be changed with the 'UpdateTable' event. 
+
+```{r}
+throughput_event_name = "UpdateTable"
+glue("Number of {throughput_event_name} events: {events_count[str_detect(names(events_count), throughput_event_name)]}")
+```
+
+Let's load all the UpdateTable events:
+
+```{r}
+throughput_events = list()
+pb <- progress_estimated(n = length(folders))
+
+for (folder in folders){
+  files <- list.files(folder, pattern = ".json$", full.names = TRUE)
+  events <- map(files, read_json %>% 
+                  unlist(., recursive = F)) %>% 
+                  unlist(., recursive = F) %>% 
+                  unlist(., recursive = F)
+  inds_throughput_event <- map_lgl(events, function(event) str_detect(event$eventName, throughput_event_name))
+  throughput_events <- c(throughput_events, events[inds_throughput_event])
+  pb$tick()$print()
+}
+
+```
+
+The information about throughput capacity is the following:
+
+```{r}
+n_event <- 10
+throughput_events[[n_event]][c(3,9)]
+```
+
+The ordinary behaviour is increase the writeCapacityUnits when doing an insert into DynamoDB, and then reduce it in order to save money. So, we can considerer as anomalous event when this reduction doesn't happen. 
+Let's plot the historical changes so as to see if there is some pattern that could be broken. 
+
+```{r}
+throughput_events.df <- map(throughput_events, function(event) data.frame(
+  event$eventTime,
+  event$requestParameters$tableName,
+  event$requestParameters$provisionedThroughput$readCapacityUnits,
+  event$requestParameters$provisionedThroughput$writeCapacityUnits
+  ) 
+)
+throughput_events.df <- do.call(rbind, throughput_events.df)
+colnames(throughput_events.df) <- c("eventTime", "tableName", "readCapacityUnits", "writeCapacityUnits")
+throughput_events.df$eventTime %<>% lubridate::ymd_hms()
+throughput_events.df$readCapacityUnits %<>% as.numeric()
+throughput_events.df$writeCapacityUnits %<>% as.numeric()
+```
+
+```{r}
+ggplot(throughput_events.df) + 
+  geom_line(aes(x = eventTime, y = writeCapacityUnits, color = tableName)) +
+  guides(colour = FALSE) + 
+  theme_bw()
+
+ggplot(throughput_events.df) + 
+  geom_line(aes(x = eventTime, y = readCapacityUnits, color = tableName)) +
+  guides(colour = FALSE) + 
+  theme_bw() 
+
+ggplot(throughput_events.df) + 
+  geom_line(aes(x = eventTime, y = writeCapacityUnits, color = tableName)) +
+  theme_bw()
+```
+
+We see a strong pattern in the write capacity: about half a month it is increased, and then it is reduced to the minimum allowed value. If this pattern gets broken, we could tag it as anomalous throughput event.
+The read capacity is constant so it's even more easy to detect an anomalues event.

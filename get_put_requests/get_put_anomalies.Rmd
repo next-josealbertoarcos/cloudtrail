@@ -1,0 +1,152 @@
+---
+title: 'CloudTrail Logs Analysis: Detecting Get/Put Throughput Events'
+output:
+  html_document: default
+  html_notebook: default
+---
+
+```{r, include = FALSE}
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(parallel)
+library(glue)
+library(futile.logger)
+library(data.table)
+library(jsonlite)
+library(R.utils)
+library(magrittr)
+library(plotly)
+```
+
+The data consists of the logs of events given by AWS CloudTrail. They are in JSON format and compressed in gzip format, so we need to extract all of them. First, we get all the file paths:
+
+```{r}
+path = "~/apidatos-mx-pro-cloudtrail"
+months <- list.files(path, full.names = TRUE)
+folders <- unlist(lapply(months, function(x) list.files(x, full.names = TRUE)))
+n_folders <- length(folders)
+```
+
+Now we are going to extract all the files. We can speed up it using parallel processing.
+
+```{r}
+
+no_cores <- detectCores() - 1
+cl <- makeCluster(no_cores)
+clusterEvalQ(cl, expr = {
+  library(jsonlite)
+  library(R.utils)
+}) %>% invisible()
+
+json.list <- vector("list", n_folders)
+pb <- progress_estimated(n = length(folders))
+
+for (folder in folders) {
+  gz_files <- list.files(folder, pattern = ".gz$", full.names = TRUE)
+  if (length(gz_files) > 0) {
+    parLapply(cl, gz_files, function(x) gunzip(x, overwrite = TRUE))
+  }
+  pb$tick()$print()
+}
+
+stopCluster(cl)
+```
+
+Once we have all the decompressed JSON files, we are going to read all of the different event names in order to have an idia of how many they could be.
+
+```{r}
+events_names = c()
+pb <- progress_estimated(n = length(folders))
+
+for(folder in folders){
+  files <- list.files(folder, pattern = ".json$", full.names = TRUE)
+  events_names <- c(events_names, 
+                   map(.x = files, function(file) {
+                     read_json(file) %>% unlist(recursive = FALSE) %>% 
+                       map(., function(event) event$eventName) %>% unlist()
+                   }))
+  
+  pb$tick()$print()
+}
+events_names %<>% unlist() 
+```
+
+```{r}
+events_count <- events_names %>% table() %>% sort(., decreasing = T)
+glue("Number of total events: {length(events_names)}")
+glue("Number of different events: {length(unique(events_names))}")
+round(100*events_count[0:25]/length(events_names),2)
+```
+
+Our goal is to analyse the Get and Put events in order to detect if there are some anomalous behaviour. 
+First, let's see all the particular events related with each of both and how many there are.
+
+```{r}
+get_events_names = unique(events_names[str_detect(events_names, "Get")])
+put_events_names = unique(events_names[str_detect(events_names, "Put")])
+glue("Get events: \n {paste(get_events_names, collapse = \", \")}")
+glue("")
+glue("Put events: \n {paste(put_events_names, collapse = \", \")}")
+glue("")
+glue("Number of Get events: {sum(events_count[get_events_names])}")
+glue("Number of Put events: {sum(events_count[put_events_names])}")
+```
+
+Let's load all the Get and Put events:
+
+```{r}
+get_events = list()
+put_events = list()
+pb <- progress_estimated(n = length(folders))
+
+for (folder in folders){
+  files <- list.files(folder, pattern = ".json$", full.names = TRUE)
+  events <- map(files, read_json %>% 
+                  unlist(., recursive = F)) %>% 
+                  unlist(., recursive = F) %>% 
+                  unlist(., recursive = F)
+  inds_get_event <- map_lgl(events, function(event) event$eventName %in% get_events_names)
+  inds_put_event <- map_lgl(events, function(event) event$eventName %in% put_events_names)
+  get_events <- c(get_events, events[inds_get_event])
+  put_events <- c(put_events, events[inds_put_event])
+  
+  pb$tick()$print()
+}
+
+```
+
+
+```{r}
+to_n_minutal <- function(str_date, n = 5) {
+  minute <- substr(str_date, 15, 16) %>% as.numeric
+  remainder <- minute%%n
+  substr(str_date, 15, 16) <- as.character(minute - remainder) %>% str_pad(., 2, "left", "0")
+  return(substr(str_date, 1, 16))
+}
+```
+
+
+```{r}
+get_events.df <- map_chr(get_events, function(event) event$eventTime) %>% substr(., 1, 13) %>% ymd_h() %>% data.frame()
+colnames(get_events.df) <- c("eventTime")
+hourly_get_events.df <- get_events.df %>% group_by(eventTime) %>% summarise(requests = n()) %>% ungroup()
+```
+
+```{r}
+ggplot(hourly_get_events.df %>% filter(eventTime > "2017-06-30")) +
+  geom_line(aes(x = eventTime, y = requests))
+```
+
+```{r}
+put_events.df <- map_chr(put_events, function(event) event$eventTime) %>% substr(., 1, 13) %>% ymd_h() %>% data.frame()
+colnames(put_events.df) <- c("eventTime")
+hourly_put_events.df <- put_events.df %>% group_by(eventTime) %>% summarise(requests = n()) %>% ungroup()
+```
+
+```{r}
+ggplot(hourly_put_events.df) +
+  geom_line(aes(x = eventTime, y = requests))
+```
+
+
