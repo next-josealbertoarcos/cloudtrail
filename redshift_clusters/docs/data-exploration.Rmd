@@ -20,7 +20,7 @@ library(glue)
 Let's load a json file and see what it contains:
 
 ```{r}
-file <- read_json("../2017/07/21/405540905874_CloudTrail_eu-west-1_20170721T0000Z_toFMCcKusnum4iUt.json")
+file <- read_json("../../data/2017/07/21/405540905874_CloudTrail_eu-west-1_20170721T0000Z_toFMCcKusnum4iUt.json")
 str(file)
 ```
 
@@ -74,7 +74,7 @@ Great!!
 Some files contain fields that are difficult to "tidy":
 
 ```{r}
-file <- read_json("../2017/04/22/405540905874_CloudTrail_eu-west-1_20170422T0000Z_EdBbEouphu5PwnGH.json")
+file <- read_json("../../data/2017/04/22/405540905874_CloudTrail_eu-west-1_20170422T0000Z_EdBbEouphu5PwnGH.json")
 data <- file[[1]]
 datalist <- map(data, ~ as.data.frame(as.list(unlist(.))))
 df <- rbind.fill(datalist)
@@ -99,7 +99,7 @@ str(data[[254]])
 Let's take data for an entire day.
 
 ```{r}
-json_files <- list.files(path = "../2017/07/21/", full.names = TRUE)
+json_files <- list.files(path = "../../data/2017/07/21/", full.names = TRUE)
 json_list <- map(json_files, ~ read_json(path = .)[[1]])
 json_list <- do.call(c, json_list)
 ```

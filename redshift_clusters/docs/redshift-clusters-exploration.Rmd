@@ -19,7 +19,9 @@ library(magrittr)
 
 ### Abstract
 
-This document explores the usage of Redshift clusters in the available log data. Redshift clusters are one of the main economical costs of the project, so it is important to monitor them in order to detect inefficient patterns (like clusters running but doing nothing).
+This document explores the usage of Redshift clusters in the available log data. Redshift clusters are one of the main economical costs of the project, so it is important to monitor them in order to detect inefficient patterns (like clusters running but doing nothing). 
+
+Amazon Redshift is a fast, fully managed data warehouse that makes it simple and cost-effective to analyze all your data using standard SQL and your existing Business Intelligence (BI) tools. It allows you to run complex analytic queries against petabytes of structured data, using sophisticated query optimization, columnar storage on high-performance local disks, and massively parallel query execution. Most results come back in seconds. 
 
 <br>
 
@@ -31,7 +33,7 @@ We can easily take all the events whose *eventSource* is *redshift.amazonaws.com
 
 ```{r}
 
-folders <- list.dirs("../")
+folders <- list.dirs("../../data/2017/")
 
 events <- map(folders, function(folder){
   files <- list.files(path = folder, full.names = T)
@@ -247,3 +249,18 @@ ggplot(data = creation_deletion_events,
 ```
 
 It looks that the events are correct! The problem is that lots of them do not have a target. Interesting detail.
+
+What is the percentage of 'wrong' events?
+
+```{r}
+n_fake_events <- 
+  creation_deletion_events %>% 
+  filter(is.na(target_cluster)) %>% 
+  nrow()
+
+n_events <- nrow(creation_deletion_events)
+
+fake_percentage <- n_fake_events / n_events
+fake_percentage
+```
+

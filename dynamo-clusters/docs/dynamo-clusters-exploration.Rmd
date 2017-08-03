@@ -1,0 +1,63 @@
+---
+title: "Dynamo cluster usage"
+author: "José Alberto Arcos Sánchez"
+date: "2 de agosto de 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(purrr)
+library(futile.logger)
+library(glue)
+library(stringr)
+library(jsonlite)
+library(tidyverse)
+library(lubridate)
+library(magrittr)
+```
+
+<br>
+
+### Abstract
+
+This document explores the usage of DynamoDB clusters in the available log data. Amazon DynamoDB is a fast and flexible NoSQL database service for all applications that need consistent, single-digit millisecond latency at any scale. It is a fully managed cloud database and supports both document and key-value store models. Its flexible data model, reliable performance, and automatic scaling of throughput capacity, makes it a great fit for mobile, web, gaming, ad tech, IoT, and many other applications.
+
+<br>
+
+### DynamoDB events in Cloudtrail
+
+The list of supported actions and its meaning can be found [here](http://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_Operations_Amazon_DynamoDB.html).
+
+We can easily take all the events whose *eventSource* is *dynamodb.amazonaws.com*... using a machine with 20GB of RAM :)
+
+I need to select the interesting info inside the DynamoDB events. Looking at the documentation, lots of events are related to table managing. We are only interested in events concerning clusters. Let's see what kind of events are tagged as DynamoDB events:
+
+```{r}
+
+folders <- list.dirs("../../data/2017/")
+
+events <- map(folders, function(folder){
+  files <- list.files(path = folder, full.names = T)
+  files <- files[str_detect(files, ".json")]
+  map(files, function(file){
+    flog.debug(glue("Reading file {file}"))
+    events_in_file <- read_json(file) %>% unlist(recursive = FALSE)
+    interesting_events <- 
+      map(events_in_file, function(event){
+        if(event$eventSource == "dynamodb.amazonaws.com" && event$eventName != "DescribeTable" && event$eventName != "ListTables"){
+          return(event$eventName)
+        } else {
+          return(NA_character_)
+        }
+      }) %>% unlist()
+    discard(interesting_events, ~ is.null(.))
+  })
+})
+
+a <- unlist(events, use.names = FALSE)
+b <- keep(a, ~ !is.na(.))
+unique(b)
+```
+
+There are not events concerning cluster managing!! So I cannot explore them.
