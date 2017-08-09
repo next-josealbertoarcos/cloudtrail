@@ -264,3 +264,163 @@ fake_percentage <- n_fake_events / n_events
 fake_percentage
 ```
 
+
+### Plotting cluster existence
+
+The idea is to plot a "life-line" for each cluster using the *DescribeClusters* events.
+
+```{r}
+
+load("all_redshift_events.RData")
+describe_clusters_index <- map_lgl(events, ~ .$eventName == "DescribeClusters")
+describe_clusters <- events[describe_clusters_index]
+rm(events)
+
+# Preallocate variable
+df_datetime = rep(NA_character_, 5e5)
+df_cluster = rep(NA_character_, 5e5)
+df_creation_date = rep(NA_character_, 5e5)
+df_n_nodes = numeric(5e5)
+
+# Fill variable
+index <- 1
+pb <- progress_estimated(n = length(describe_clusters))
+# pb <- progress_estimated(n = 1e4)
+for(i in 1:length(describe_clusters)){
+  # for(i in 1:1e4){  
+  event <- describe_clusters[[i]]
+  n_clusters <- length(event$responseElements$clusters)
+  
+  if(n_clusters > 0){
+    
+    datetimes <- rep(event$eventTime, n_clusters)
+    cluster_names <- map_chr(event$responseElements$clusters,  ~ .$clusterIdentifier)
+    creation_dates <- map_chr(event$responseElements$clusters, function(cluster){
+      times <- cluster$clusterCreateTime
+      ifelse(is.null(times), NA_character_, times)
+    })
+    n_nodes <- map_int(event$responseElements$clusters, ~ .$numberOfNodes)
+    
+    if(length(datetimes) != n_clusters) browser()
+    if(length(cluster_names) != n_clusters) browser()
+    if(length(creation_dates) != n_clusters) browser()
+    if(length(n_nodes) != n_clusters) browser()
+    
+    df_datetime[index:(index + n_clusters - 1)] <- datetimes
+    df_cluster[index:(index + n_clusters - 1)] <- cluster_names
+    df_creation_date[index:(index + n_clusters - 1)] <- creation_dates
+    df_n_nodes[index:(index + n_clusters - 1)] <- n_nodes
+    
+    index <- index + n_clusters
+    
+  }
+
+  pb$tick()$print()
+}
+
+cluster_info <- tibble(datetime = df_datetime[1:index],
+                       cluster = df_cluster[1:index],
+                       creation_date = df_creation_date[1:index],
+                       n_nodes = df_n_nodes[1:index])
+```
+
+
+```{r}
+history <- cluster_info %>% select(datetime, cluster)
+cluster_names <- unique(history$cluster)[1:7]
+for(name in cluster_names){
+  cluster_history <- as.integer(name == history$cluster)
+  history[[name]] <- cluster_history
+}
+
+history[1,] <- 0
+
+for(name in cluster_names){
+  cluster_diff <- diff(history[[name]])
+  history[[paste0(name, "_diff")]] <- c(0, cluster_diff)
+}
+
+history_on_off <- history %>% select(datetime, contains("diff"))
+```
+
+
+
+```{r}
+
+# Create a list containing all the start and stop datetimes for all the clusters
+start_stop_list <- map(2:ncol(history_on_off), function(col){
+  start_datetime <- history_on_off$datetime[history_on_off[[col]] == 1]
+  stop_datetime <- history_on_off$datetime[history_on_off[[col]] == -1]
+  cluster <- names(history_on_off)[col]
+  list(start_datetime = start_datetime,
+       stop_datetime = stop_datetime)
+})
+names(start_stop_list) <- colnames(history_on_off)[2:ncol(history_on_off)]
+
+
+# Remove repeated datetimes
+start_stop_list_1 <- map(start_stop_list, function(cluster){
+  remove_start <- cluster[[1]] %in% cluster[[2]]
+  remove_stop  <- cluster[[2]] %in% cluster[[1]]
+  cluster[[1]] <- cluster[[1]][!remove_start]
+  cluster[[2]] <- cluster[[2]][!remove_stop]
+  tibble(datetime = c(cluster[[1]], cluster[[2]]),
+         action = c(rep("start", length(cluster[[1]])), rep("stop", length(cluster[[2]]))))
+})
+
+# Order datetimes and remove nonsenses
+start_stop_list_2 <- map(start_stop_list_1, function(cluster){
+  cluster %>% arrange(datetime) %>% 
+    mutate(nonsense = (action == lag(action))) %>% filter(!nonsense) %>% 
+    select(-nonsense)
+})
+
+# Spread datetimes
+start_stop_list_3 <- map(start_stop_list_2, function(cluster){
+  start_dates <- cluster %>% filter(action == "start") %>% .$datetime
+  stop_dates <- cluster %>% filter(action == "stop") %>% .$datetime
+  
+  if(cluster$action[1] == "stop")
+    start_dates <- c(NA_character_, start_dates)
+  if(cluster$action[nrow(cluster)] == "start")
+    stop_dates <- c(stop_dates, NA_character_)
+  
+  cluster <- NA_character_
+  tibble(start_datetime = start_dates, stop_datetime = stop_dates, cluster = cluster)
+})
+
+cluster_names <- colnames(history)[3:9]
+start_stop_list_4 <- map2(start_stop_list_3, cluster_names, function(cluster, name){
+  cluster$cluster = name
+  cluster
+})
+
+start_stop_list_final <- do.call(rbind, start_stop_list_4)
+start_stop_list_final$cluster %<>%  as.factor()
+start_stop_list_final$start_datetime %<>%  ymd_hms()
+start_stop_list_final$stop_datetime %<>%  ymd_hms()
+```
+
+```{r}
+start_stop_list_final %>% 
+  filter(complete.cases(.)) %>% 
+  ggplot() +
+  geom_rect(mapping = aes(xmin = start_datetime, xmax = stop_datetime,
+                          ymin = as.integer(cluster) - 0.05, ymax = as.integer(cluster) + 0.05),
+            fill = "forest green") +
+  geom_text(mapping = aes(x = ymd_hms("2017-05-10 00:00:00"), 
+                          y = as.integer(cluster), label = cluster),
+            hjust = 0, vjust = 0, colour = "gray40", nudge_y = 0.15, size = 3.5) +
+  theme_minimal() +
+  scale_y_continuous(breaks = 1:7) +
+  theme(plot.margin = unit(c(1,1,1,1), "cm"),
+        plot.title = element_text(margin = unit(c(0,0,2,0), "cm")),
+        panel.grid.major.y = element_line(size = 1, color = "grey"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title = element_blank()) +
+  labs(title = "Cluster existence")
+```
+
+Results are not as good as desired!
